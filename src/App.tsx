@@ -1999,13 +1999,17 @@ jobs:
                                    files: { 'settings.json': { content: settingsObj } }
                                  });
                               }
-                              setSaveStatus({ type: 'success', message: 'Settings saved successfully locally and to GitHub Gists!' });
+                              setSaveStatus({ type: 'success', message: 'Settings saved to Cloud and Local!' });
                             } else {
-                              setSaveStatus({ type: 'success', message: 'Settings saved successfully locally.' });
+                              setSaveStatus({ type: 'success', message: 'Settings saved locally.' });
                             }
                             setTimeout(() => setSaveStatus({ type: 'idle', message: '' }), 5000);
                           } catch(e: any) {
-                            setSaveStatus({ type: 'error', message: 'Failed to save configuration: ' + e.message });
+                            if (e.name === 'QuotaExceededError' || e.message?.includes('quota')) {
+                               setSaveStatus({ type: 'error', message: 'Browser Storage Full. Please use "Clear Local Cache" below.' });
+                            } else {
+                               setSaveStatus({ type: 'error', message: 'Save Failed: ' + e.message });
+                            }
                           }
                         }}
                         disabled={saveStatus.type === 'saving'}
@@ -2013,6 +2017,20 @@ jobs:
                       >
                          Save Configuration
                       </button>
+
+                      <div className="pt-4 border-t border-zinc-800 flex flex-col gap-2">
+                        <button 
+                          onClick={() => {
+                            if (confirm("This will clear your local API keys and token. You will need to login again. Continue?")) {
+                              localStorage.clear();
+                              window.location.reload();
+                            }
+                          }}
+                          className="w-full bg-zinc-900 border border-zinc-800 text-zinc-500 hover:text-red-400 py-2 rounded-lg text-xs transition-colors"
+                        >
+                          Clear Local Cache (Fix Quota Error)
+                        </button>
+                      </div>
                     </div>
                   </div>
                 )}
