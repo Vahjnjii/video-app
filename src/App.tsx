@@ -841,10 +841,38 @@ jobs:
       if (e.data.size > 0) chunks.push(e.data);
     };
 
-    recorder.onstop = () => {
+    recorder.onstop = async () => {
       const blob = new Blob(chunks, { type: 'video/webm' });
       (window as any)._finalVideoBlob = blob;
       console.log("Final video blob ready (9:16 aspect ratio confirmed)");
+      
+      setStatus('Sending to backend to render exact preview to MP4. Please wait...');
+      try {
+        const formData = new FormData();
+        formData.append("video", blob, "preview.webm");
+        
+        const response = await fetch("/api/video/render", {
+          method: "POST",
+          body: formData
+        });
+        
+        if (!response.ok) throw new Error("Render Failed");
+        
+        const mp4Blob = await response.blob();
+        const url = URL.createObjectURL(mp4Blob);
+        
+        // Trigger download
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `video_render_${Date.now()}.mp4`;
+        a.click();
+        URL.revokeObjectURL(url);
+        
+        setStatus('Ready!');
+      } catch (err: any) {
+        console.error("Backend render failed:", err);
+        setStatus("Render failed: " + err.message);
+      }
     };
 
     recorder.start();
@@ -1035,12 +1063,6 @@ jobs:
   };
 
   const generateFullVideo = async (providedScript?: string) => {
-    if (!githubToken) {
-      setError("Please login via GitHub in Settings first.");
-      setShowSettings(true);
-      return;
-    }
-
     const textToUse = providedScript || script;
     if (!textToUse.trim()) {
       setError('Enter a script first.');
@@ -1145,46 +1167,14 @@ jobs:
 
       await Promise.all(imagePromises);
 
-      setStatus('Committing to GitHub Actions for rendering...');
-      
-      const imagesPayload = [];
-      let timelineText = '';
-      
-      for (let i = 0; i < scenePlan.length; i++) {
-        const scene = scenePlan[i];
-        const nextTimestamp = i < scenePlan.length - 1 ? scenePlan[i + 1].timestamp : audioDuration;
-        const duration = Math.max(0.1, nextTimestamp - scene.timestamp);
-        
-        // Find matching blob or capture from canvas if possible
-        const b = gatheredBlobs[i];
-        
-        if (b) {
-          const filename = `scene_${i.toString().padStart(3, '0')}.jpg`;
-          const base64Img = await blobToBase64(b);
-          imagesPayload.push({ filename, base64: base64Img });
-          
-          timelineText += `file 'images/${filename}'\n`;
-          timelineText += `duration ${duration.toFixed(2)}\n`;
-        }
-      }
-      
-      // FFmpeg concat demuxer format convention requires repeating the last file name without duration
-      if (imagesPayload.length > 0) {
-        timelineText += `file 'images/${imagesPayload[imagesPayload.length - 1].filename}'\n`;
-      }
-
-      const timestamp = Date.now().toString();
-      const octokit = new Octokit({ auth: githubToken });
-      
-      await uploadProjectToGitHub(octokit, user.login, timestamp, audioBase64, imagesPayload, timelineText, textToUse, scenePlan);
-
-      setStatus('Deployed! Check GitHub Releases for mp4.');
-      
-      const newProjects = await fetchProjects(octokit, user.login);
-      setSelectedProjectId(timestamp);
-      
+      setStatus('Images ready! Starting exact preview render recording... DO NOT SWITCH TABS');
       setIsGenerating(false);
       setProgress(100);
+      
+      setTimeout(() => {
+        handleRecordVideo();
+      }, 500);
+      
     } catch (err: any) {
       setError(err.message || 'Workflow error');
       setIsGenerating(false);
@@ -1725,6 +1715,20 @@ jobs:
           </div>
 
           <div className="flex items-center gap-3">
+             {scenes.length > 0 && !isGenerating && !isPlaying && (
+               <button
+                 onClick={() => {
+                   if (window.confirm("This will play the video from start to finish to record exactly what you see. Proceed?")) {
+                     handleRecordVideo();
+                   }
+                 }}
+                 className="flex items-center gap-2 bg-orange-500 hover:bg-orange-600 text-black text-xs font-bold px-3 py-1.5 rounded-lg transition-transform hover:scale-105 shadow-[0_0_10px_rgba(249,115,22,0.3)] whitespace-nowrap"
+               >
+                 <Video size={14} />
+                 Render to MP4 (Exact)
+               </button>
+             )}
+
              {selectedProjectId && dbProjects.find(p => p.id === selectedProjectId) && (
                dbProjects.find(p => p.id === selectedProjectId)?.status === 'ready' ? (
                  <button 
@@ -1732,10 +1736,10 @@ jobs:
                      const url = dbProjects.find(p => p.id === selectedProjectId)?.videoUrl;
                      if (url) window.open(url, '_blank');
                    }}
-                   className="flex items-center gap-2 bg-orange-500 hover:bg-orange-600 text-black text-xs font-bold px-3 py-1.5 rounded-lg transition-transform hover:scale-105 shadow-[0_0_10px_rgba(249,115,22,0.3)]"
+                   className="hidden sm:flex items-center gap-2 border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-bold px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap"
                  >
                    <Download size={14} />
-                   Download MP4
+                   Get Actions MP4
                  </button>
                ) : (
                  <button 
