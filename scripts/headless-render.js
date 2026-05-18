@@ -23,6 +23,7 @@ async function run() {
   });
   
   const page = await browser.newPage();
+  await page.evaluateOnNewDocument(() => { window.isHeadless = true; });
   
   // Set download behavior safely
   const client = await page.target().createCDPSession();
@@ -31,7 +32,7 @@ async function run() {
     downloadPath: outDir
   });
 
-  await page.setViewport({ width: 1280, height: 1280, deviceScaleFactor: 2 });
+  await page.setViewport({ width: 720, height: 1280, deviceScaleFactor: 2 });
   
   console.log("Navigating to local app...");
   await page.goto(`http://localhost:${serverPort}`, { waitUntil: 'networkidle0', timeout: 60000 });

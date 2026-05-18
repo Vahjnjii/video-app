@@ -128,7 +128,19 @@ export default function App() {
   const [apiKeys, setApiKeys] = useState<string[]>([]);
   const [imageUrls, setImageUrls] = useState<string[]>([]);
   const [dbProjects, setDbProjects] = useState<Project[]>([]);
-  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('lastProjectId');
+    }
+    return null;
+  });
+
+  useEffect(() => {
+    if (selectedProjectId) {
+      localStorage.setItem('lastProjectId', selectedProjectId);
+    }
+  }, [selectedProjectId]);
+
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
   const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
@@ -144,6 +156,78 @@ export default function App() {
   useEffect(() => {
     setIsSidebarOpen(window.innerWidth >= 1024);
   }, []);
+
+  const [isLoadingProject, setIsLoadingProject] = useState(false);
+
+  useEffect(() => {
+    if (selectedProjectId && githubToken && user) {
+      const loadProjectData = async () => {
+        setIsLoadingProject(true);
+        const octokit = new Octokit({ auth: githubToken });
+        const owner = user.login;
+        const repo = 'ai-studio-video-projects';
+
+        try {
+          // Fetch script
+          const { data: scriptContent } = await octokit.repos.getContent({
+            owner, repo, path: `projects/${selectedProjectId}/script.txt`
+          }) as any;
+          const decodedScript = decodeURIComponent(escape(atob(scriptContent.content)));
+          setScript(decodedScript);
+          setOriginalScript(decodedScript);
+
+          // Fetch timeline
+          const { data: timelineContent } = await octokit.repos.getContent({
+            owner, repo, path: `projects/${selectedProjectId}/timeline.txt`
+          }) as any;
+          const timelineLines = decodeURIComponent(escape(atob(timelineContent.content))).split('\n');
+          
+          // Reconstruct scenes
+          const reconstructedScenes: Scene[] = [];
+          for (let i = 0; i < timelineLines.length; i++) {
+            const line = timelineLines[i];
+            if (line.startsWith('file ')) {
+              const imgPath = line.replace('file ', '').replace(/'/g, '');
+              const { data: imgData } = await octokit.repos.getContent({
+                owner, repo, path: `projects/${selectedProjectId}/${imgPath}`
+              }) as any;
+              
+              const durationLine = timelineLines[i+1];
+              const duration = durationLine?.startsWith('duration ') ? parseFloat(durationLine.replace('duration ', '')) : 5;
+              
+              reconstructedScenes.push({
+                timestamp: duration,
+                prompt: `Fetched Scene ${reconstructedScenes.length + 1}`,
+                text: "Loading transcript...", // We'd ideally store this in metadata or parse audio
+                imageUrl: `data:image/webp;base64,${imgData.content.replace(/\s/g, '')}`
+              });
+              i++; // Skip duration line
+            }
+          }
+          setScenes(reconstructedScenes);
+          
+          // Audio loading
+          try {
+            const { data: audioData } = await octokit.repos.getContent({
+              owner, repo, path: `projects/${selectedProjectId}/audio.wav`
+            }) as any;
+            setAudioUrl(`data:audio/wav;base64,${audioData.content.replace(/\s/g, '')}`);
+          } catch (e) {
+            console.error("Audio fetch failed", e);
+          }
+
+        } catch (error) {
+          console.error("Failed to load project details:", error);
+        } finally {
+          setIsLoadingProject(false);
+        }
+      };
+      
+      loadProjectData();
+    }
+  }, [selectedProjectId]);
+
+  const [showVoiceSelector, setShowVoiceSelector] = useState(false);
 
   // Base state
   const [script, setScript] = useState('');
@@ -256,7 +340,7 @@ jobs:
               dir=$(dirname "$timeline")
               echo "Rendering $dir/output.mp4"
               cd "$dir"
-              ffmpeg -f concat -safe 0 -i timeline.txt -i "audio.wav" -c:v libx264 -pix_fmt yuv420p -c:a aac -vf "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2" -shortest output.mp4
+              ffmpeg -f concat -safe 0 -i timeline.txt -i "audio.wav" -c:v libx264 -pix_fmt yuv420p -c:a aac -vf "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2" -shortest output.mp4
               PROJECT_ID=$(basename "$dir")
               cd -
               gh release create "vid-\${PROJECT_ID}" "$dir/output.mp4" --title "Video \${PROJECT_ID}" --notes "Rendered MP4 via Actions" || true
@@ -650,6 +734,60 @@ jobs:
       (window as any)._previewAtmosphere.stop();
       (window as any)._previewAtmosphere = null;
     }
+  };
+
+  useEffect(() => {
+    if ((window as any).isHeadless && scenes.length > 0 && !isGenerating && !isPlaying && audioUrl) {
+      handleRecordVideo();
+    }
+  }, [scenes, isGenerating, isPlaying, audioUrl]);
+
+  const handleRecordVideo = async () => {
+    if (!canvasRef.current || !audioUrl) return;
+    
+    console.log("Starting high-quality recording...");
+    const canvas = canvasRef.current;
+    
+    // Capture stream at 30fps
+    const stream = canvas.captureStream(30);
+    
+    // Audio capture
+    const audio = audioRef.current;
+    if (!audio) return;
+    
+    audio.currentTime = 0;
+    const audioStream = (audio as any).captureStream ? (audio as any).captureStream() : null;
+    if (audioStream) {
+      audioStream.getAudioTracks().forEach((track: MediaStreamTrack) => stream.addTrack(track));
+    }
+
+    const recorder = new MediaRecorder(stream, {
+      mimeType: 'video/webm;codecs=vp9',
+      videoBitsPerSecond: 12000000 // 12Mbps for high quality
+    });
+
+    const chunks: Blob[] = [];
+    recorder.ondataavailable = (e) => {
+      if (e.data.size > 0) chunks.push(e.data);
+    };
+
+    recorder.onstop = () => {
+      const blob = new Blob(chunks, { type: 'video/webm' });
+      (window as any)._finalVideoBlob = blob;
+      console.log("Final video blob ready!");
+    };
+
+    recorder.start();
+    handlePlay();
+    
+    // Auto stop when audio ends
+    const checkEnd = setInterval(() => {
+      if (audio.ended || audio.currentTime >= audio.duration - 0.1) {
+        clearInterval(checkEnd);
+        recorder.stop();
+        handlePause();
+      }
+    }, 500);
   };
 
   const handlePause = () => {
@@ -1805,15 +1943,38 @@ jobs:
               >
                 <div className="p-2 sm:p-3 relative z-30">
                   <div className="max-w-3xl mx-auto flex items-end gap-2 bg-zinc-900 rounded-xl p-1 focus-within:ring-1 focus-within:ring-orange-500/50 transition-all shadow-inner border border-zinc-800">
-                    <button
-                      type="button"
-                      onClick={() => setShowSettings(!showSettings)}
-                      className="shrink-0 h-[36px] px-3 flex items-center gap-2 hover:bg-zinc-800 text-zinc-400 hover:text-white rounded-lg transition-colors group/voice"
-                      title="Select Voice Model"
-                    >
-                      <Volume2 size={16} className="text-orange-500 group-hover/voice:scale-110 transition-transform" />
-                      <span className="text-[10px] font-bold uppercase tracking-widest hidden xs:block">{VOICES.find(v => v.id === selectedVoice)?.name.split(' (')[0]}</span>
-                    </button>
+      {showVoiceSelector && (
+        <div className="absolute bottom-full left-0 mb-2 w-64 bg-zinc-950 border border-zinc-800 rounded-xl shadow-2xl overflow-hidden z-50">
+          <div className="p-2 border-b border-zinc-800 bg-zinc-900/50">
+            <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest pl-1">Select Voice Model</span>
+          </div>
+          <div className="max-h-60 overflow-y-auto custom-scrollbar">
+            {VOICES.map(v => (
+              <button
+                key={v.id}
+                onClick={() => {
+                  setSelectedVoice(v.id);
+                  setShowVoiceSelector(false);
+                }}
+                className={`w-full text-left px-4 py-3 text-[12px] flex items-center justify-between transition-colors
+                  ${selectedVoice === v.id ? 'bg-orange-500/10 text-orange-500' : 'text-zinc-400 hover:bg-zinc-900 hover:text-white'}`}
+              >
+                <span>{v.name}</span>
+                {selectedVoice === v.id && <Zap size={12} fill="currentColor" />}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+      <button
+        type="button"
+        onClick={() => setShowVoiceSelector(!showVoiceSelector)}
+        className="shrink-0 h-[36px] px-3 flex items-center gap-2 hover:bg-zinc-800 text-zinc-400 hover:text-white rounded-lg transition-colors group/voice"
+        title="Select Voice Model"
+      >
+        <Volume2 size={16} className="text-orange-500 group-hover/voice:scale-110 transition-transform" />
+        <span className="text-[10px] font-bold uppercase tracking-widest hidden xs:block">{VOICES.find(v => v.id === selectedVoice)?.name.split(' (')[0]}</span>
+      </button>
                     <div className="w-px h-6 bg-zinc-800 shrink-0 mb-1.5" />
                     <textarea
                       ref={textareaRef}
