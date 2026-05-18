@@ -1,7 +1,8 @@
 {
   "name": "react-example",
+  "version": "1.0.1",
+  "comment": "Added sidebar improvements, chat renaming, and fixed GitHub Pages base path.",
   "private": true,
-  "version": "0.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",

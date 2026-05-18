@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// v1.0.1 - Sidebar & GitHub Pages Fix
 import { useState, useRef, useEffect, useMemo, FormEvent } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
