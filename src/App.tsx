@@ -44,7 +44,7 @@ let currentApiIndex = 0;
     const response = await fetch('/api/gemini/generate', {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(params)
+      body: JSON.stringify({ ...params, clientProvidedKeys: apiKeys })
     });
     if (!response.ok) {
       const err = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
@@ -99,6 +99,8 @@ export default function App() {
   const [githubToken, setGithubToken] = useState<string | null>(null);
   const [githubTokenInput, setGithubTokenInput] = useState('');
   const [isAuthLoading, setIsAuthLoading] = useState(true);
+  const [apiKeys, setApiKeys] = useState<string[]>([]);
+  const [imageUrls, setImageUrls] = useState<string[]>([]);
   const [dbProjects, setDbProjects] = useState<Project[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(() => {
     if (typeof window !== 'undefined') {
@@ -214,6 +216,8 @@ export default function App() {
   // Base state
   const [script, setScript] = useState('');
   const [originalScript, setOriginalScript] = useState('');
+  const [apiKeysInputText, setApiKeysInputText] = useState('');
+  const [imageUrlsInputText, setImageUrlsInputText] = useState('');
   const [saveStatus, setSaveStatus] = useState<{ type: 'idle' | 'saving' | 'success' | 'error', message: string }>({ type: 'idle', message: '' });
   const [selectedVoice, setSelectedVoice] = useState('Charon');
   const [isGenerating, setIsGenerating] = useState(false);
@@ -470,6 +474,23 @@ jobs:
   }, [githubToken, user, dbProjects]);
 
   useEffect(() => {
+    // Load local settings first
+    const localKeys = localStorage.getItem('GEMINI_API_KEYS');
+    if (localKeys) {
+      try {
+        const parsed = JSON.parse(localKeys);
+        setApiKeys(parsed);
+        setApiKeysInputText(parsed.join(', \n'));
+      } catch(e) {}
+    }
+    
+    const localUrls = localStorage.getItem('IMAGE_WORKER_URLS');
+    if (localUrls) {
+      const urlsArray = localUrls.split(',').filter(Boolean);
+      setImageUrls(urlsArray);
+      setImageUrlsInputText(urlsArray.join(', \n'));
+    }
+
     const storedToken = localStorage.getItem('GITHUB_TOKEN');
     if (storedToken) {
       fetchUserData(storedToken);
@@ -494,6 +515,10 @@ jobs:
     localStorage.removeItem('GITHUB_TOKEN');
     setGithubToken(null);
     setUser(null);
+    setApiKeys([]);
+    setImageUrls([]);
+    setApiKeysInputText('');
+    setImageUrlsInputText('');
     setSaveStatus({ type: 'idle', message: '' });
     setDbProjects([]);
   };
@@ -831,7 +856,7 @@ jobs:
     const response = await fetch('/api/flux/generate', {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt }),
+      body: JSON.stringify({ prompt, clientProvidedUrls: imageUrls }),
       signal: AbortSignal.timeout(60000)
     });
     if (!response.ok) {
@@ -2024,15 +2049,69 @@ jobs:
                     </div>
 
                     <div className="space-y-4">
-                      <h3 className="text-sm font-bold text-zinc-400 uppercase tracking-widest border-b border-zinc-800 pb-2">Backend Secured</h3>
+                      <h3 className="text-sm font-bold text-zinc-400 uppercase tracking-widest border-b border-zinc-800 pb-2">API Keys & Workers</h3>
                       
-                      <div className="p-4 rounded-lg bg-zinc-900 border border-zinc-800 text-sm text-zinc-400">
-                        <p className="mb-2"><strong className="text-zinc-200">Backend Secured Configuration</strong></p>
-                        <p>
-                          Gemini API Keys and Image Worker URLs are now safely stored strictly in the backend environment variables (.env file). 
-                          They are no longer stored in GitHub Gists or the browser's localStorage for security reasons.
-                        </p>
+                      <div className="space-y-2">
+                        <label className="text-xs text-zinc-500 font-bold uppercase block">Gemini API Keys (comma or line separated)</label>
+                        <textarea 
+                          value={apiKeysInputText}
+                          onChange={(e) => setApiKeysInputText(e.target.value)}
+                          className="w-full bg-black border border-zinc-800 rounded-lg p-3 text-sm font-mono text-zinc-300 placeholder:text-zinc-700 outline-none focus:border-orange-500 transition-colors"
+                          placeholder="AIzaSy...&#10;AIzaSy..."
+                          rows={2}
+                        />
                       </div>
+
+                      <div className="space-y-2">
+                        <label className="text-xs text-zinc-500 font-bold uppercase block">Flux Image Worker URLs (comma or line separated)</label>
+                        <textarea 
+                          value={imageUrlsInputText}
+                          onChange={(e) => setImageUrlsInputText(e.target.value)}
+                          className="w-full bg-black border border-zinc-800 rounded-lg p-3 text-sm font-mono text-zinc-300 placeholder:text-zinc-700 outline-none focus:border-orange-500 transition-colors"
+                          placeholder="https://flux...workers.dev&#10;https://flux..."
+                          rows={3}
+                        />
+                      </div>
+                      
+                      {saveStatus.message && (
+                        <div className={`p-3 rounded-lg text-sm flex items-center gap-2 ${saveStatus.type === 'error' ? 'bg-red-500/20 text-red-400' : saveStatus.type === 'success' ? 'bg-green-500/20 text-green-400' : 'bg-orange-500/20 text-orange-400'}`}>
+                           {saveStatus.type === 'saving' && <Loader2 size={14} className="animate-spin" />}
+                           {saveStatus.message}
+                        </div>
+                      )}
+                      
+                      <button 
+                        onClick={() => {
+                          setSaveStatus({ type: 'saving', message: 'Saving configuration locally...' });
+                          try {
+                            const newApiKeys = apiKeysInputText.split(/[,\s\n]+/).map(s => s.trim()).filter(Boolean);
+                            const newImageUrls = imageUrlsInputText.split(/[,\s\n]+/).map(s => s.trim()).filter(Boolean);
+                            
+                            setApiKeys(newApiKeys);
+                            setImageUrls(newImageUrls);
+
+                            localStorage.setItem('GEMINI_API_KEYS', JSON.stringify(newApiKeys));
+                            if (newImageUrls.length > 0) {
+                              localStorage.setItem('IMAGE_WORKER_URLS', newImageUrls.join(','));
+                            } else {
+                              localStorage.removeItem('IMAGE_WORKER_URLS'); 
+                            }
+                            
+                            setSaveStatus({ type: 'success', message: 'Settings saved securely to your browser (Never sent to GitHub!)' });
+                            setTimeout(() => setSaveStatus({ type: 'idle', message: '' }), 5000);
+                          } catch(e: any) {
+                            if (e.name === 'QuotaExceededError' || e.message?.includes('quota')) {
+                               setSaveStatus({ type: 'error', message: 'Browser Storage Full. Please use "Clear Local Cache" below.' });
+                            } else {
+                               setSaveStatus({ type: 'error', message: 'Save Failed: ' + e.message });
+                            }
+                          }
+                        }}
+                        disabled={saveStatus.type === 'saving'}
+                        className="w-full bg-orange-500 hover:bg-orange-600 text-black font-bold py-2.5 rounded-lg transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+                      >
+                         Save Configuration
+                      </button>
 
                       <div className="pt-4 border-t border-zinc-800 flex flex-col gap-2">
                         <button 

@@ -9,7 +9,10 @@ const PORT = 3000;
 
 app.use(express.json({ limit: "50mb" }));
 
-function getGeminiKeys(): string[] {
+function getGeminiKeys(clientProvidedKeys?: string[]): string[] {
+  if (clientProvidedKeys && clientProvidedKeys.length > 0) {
+    return clientProvidedKeys;
+  }
   const keysStr = process.env.GEMINI_API_KEYS;
   if (!keysStr) return [];
   try {
@@ -23,7 +26,10 @@ function getGeminiKeys(): string[] {
   }
 }
 
-function getWorkerUrls(): string[] {
+function getWorkerUrls(clientProvidedUrls?: string[]): string[] {
+  if (clientProvidedUrls && clientProvidedUrls.length > 0) {
+    return clientProvidedUrls;
+  }
   const urlsStr = process.env.IMAGE_WORKER_URLS;
   if (!urlsStr) return [
     "https://flux1.shreevathsa2k27.workers.dev/",
@@ -47,10 +53,10 @@ let currentApiIndex = 0;
 // Helper to sleep
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
-async function generateContentWithRetry(params: any): Promise<any> {
-    const keys = getGeminiKeys();
+async function generateContentWithRetry(params: any, clientProvidedKeys?: string[]): Promise<any> {
+    const keys = getGeminiKeys(clientProvidedKeys);
     if (!keys || keys.length === 0) {
-      throw new Error("No Gemini API keys found. Please configure GEMINI_API_KEYS in .env");
+      throw new Error("No Gemini API keys found. Please configure GEMINI_API_KEYS in .env or Settings");
     }
 
     let lastError: any = null;
@@ -88,8 +94,8 @@ async function generateContentWithRetry(params: any): Promise<any> {
 
 app.post("/api/gemini/generate", async (req, res) => {
   try {
-    const params = req.body;
-    const response = await generateContentWithRetry(params);
+    const { clientProvidedKeys, ...params } = req.body;
+    const response = await generateContentWithRetry(params, clientProvidedKeys);
     res.json(response);
   } catch (error: any) {
     res.status(500).json({ error: error.message || String(error) });
@@ -98,8 +104,8 @@ app.post("/api/gemini/generate", async (req, res) => {
 
 app.post("/api/flux/generate", async (req, res) => {
   try {
-    const { prompt } = req.body;
-    const workerUrls = getWorkerUrls();
+    const { prompt, clientProvidedUrls } = req.body;
+    const workerUrls = getWorkerUrls(clientProvidedUrls);
     
     const shuffledUrls = [...workerUrls].sort(() => Math.random() - 0.5);
     let lastError: any = null;
