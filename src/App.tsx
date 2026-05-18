@@ -130,6 +130,8 @@ export default function App() {
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
+  const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
+  const [editingTitle, setEditingTitle] = useState("");
 
   useEffect(() => {
     const checkMobile = () => setIsMobile(window.innerWidth < 768);
@@ -1405,16 +1407,57 @@ jobs:
                       setSelectedProjectId(p.id);
                       if (isMobile) setIsSidebarOpen(false);
                   }}>
-                    <div className="flex flex-col truncate pr-2">
-                       <span className="text-sm text-zinc-300 truncate font-mono">Project {p.id.slice(-6)}</span>
-                       <span className="text-[10px] flex items-center gap-1 mt-1">
-                          {p.status === 'rendering' ? (
-                            <span className="text-orange-500 flex items-center gap-1"><Loader2 size={10} className="animate-spin" /> Rendering...</span>
-                          ) : (
-                            <span className="text-green-500 flex items-center gap-1"><Video size={10} /> Ready</span>
-                          )}
-                       </span>
+                    <div className="flex flex-col truncate pr-2 flex-1">
+                       {editingProjectId === p.id ? (
+                         <input
+                           autoFocus
+                           className="bg-zinc-950 border border-orange-500/50 text-white text-sm px-1.5 py-0.5 rounded outline-none w-full shadow-inner"
+                           value={editingTitle}
+                           onChange={(e) => setEditingTitle(e.target.value)}
+                           onBlur={() => {
+                             if (editingTitle.trim()) {
+                               setDbProjects(prev => prev.map(proj => proj.id === p.id ? { ...proj, script: editingTitle } : proj));
+                             }
+                             setEditingProjectId(null);
+                           }}
+                           onKeyDown={(e) => {
+                             if (e.key === 'Enter') {
+                               if (editingTitle.trim()) {
+                                 setDbProjects(prev => prev.map(proj => proj.id === p.id ? { ...proj, script: editingTitle } : proj));
+                               }
+                               setEditingProjectId(null);
+                             }
+                             if (e.key === 'Escape') setEditingProjectId(null);
+                           }}
+                           onClick={(e) => e.stopPropagation()}
+                         />
+                       ) : (
+                         <>
+                           <span className="text-sm text-zinc-300 truncate font-medium">
+                             {p.script.startsWith('Project ') ? `Video ${p.id.slice(-4)}` : p.script}
+                           </span>
+                           <span className="text-[10px] flex items-center gap-1 mt-1 font-mono uppercase tracking-tighter">
+                              {p.status === 'rendering' ? (
+                                <span className="text-orange-500 flex items-center gap-1"><Loader2 size={10} className="animate-spin" /> Syncing</span>
+                              ) : (
+                                <span className="text-emerald-500/70 flex items-center gap-1"><Video size={10} /> Ready</span>
+                              )}
+                           </span>
+                         </>
+                       )}
                     </div>
+                    {!editingProjectId && (
+                      <button 
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setEditingProjectId(p.id);
+                          setEditingTitle(p.script.startsWith('Project ') ? `Video ${p.id.slice(-4)}` : p.script);
+                        }}
+                        className="opacity-0 group-hover:opacity-100 p-1.5 hover:text-orange-500 text-zinc-600 transition-all rounded hover:bg-white/5"
+                      >
+                        <PenTool size={12} />
+                      </button>
+                    )}
                   </div>
                ))}
             </div>
@@ -1761,32 +1804,42 @@ jobs:
               >
                 <div className="p-2 sm:p-3 relative z-30">
                   <div className="max-w-3xl mx-auto flex items-end gap-2 bg-zinc-900 rounded-xl p-1 focus-within:ring-1 focus-within:ring-orange-500/50 transition-all shadow-inner border border-zinc-800">
-                  <textarea
-                    ref={textareaRef}
-                    value={script}
-                    onChange={(e) => setScript(e.target.value)}
-                    onFocus={() => setIsFocused(true)}
-                    onBlur={() => setIsFocused(false)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && !e.shiftKey) {
-                        e.preventDefault();
-                        generateFullVideo();
-                        (e.target as HTMLTextAreaElement).blur();
-                      }
-                    }}
-                    placeholder="Paste script... (Press Enter to execute)"
-                    className="flex-1 bg-transparent border-none text-[13px] text-zinc-200 placeholder:text-zinc-600 outline-none resize-none px-3 py-1.5 min-h-[36px] overflow-y-auto custom-scrollbar leading-relaxed transition-[height] duration-300"
-                    rows={1}
-                  />
-                  <button
-                    onClick={() => generateFullVideo()}
-                    disabled={isGenerating || !script.trim()}
-                    className="shrink-0 h-[36px] w-[36px] bg-orange-500 hover:bg-orange-600 text-black rounded-lg flex items-center justify-center shadow-lg shadow-orange-500/20 transition-all disabled:opacity-30 disabled:scale-100 active:scale-95"
-                    title="Generate Production"
-                  >
-                    {isGenerating ? <Loader2 size={16} className="animate-spin" /> : <Zap size={16} fill="currentColor" />}
-                  </button>
-                </div>
+                    <button
+                      type="button"
+                      onClick={() => setShowSettings(!showSettings)}
+                      className="shrink-0 h-[36px] px-3 flex items-center gap-2 hover:bg-zinc-800 text-zinc-400 hover:text-white rounded-lg transition-colors group/voice"
+                      title="Select Voice Model"
+                    >
+                      <Volume2 size={16} className="text-orange-500 group-hover/voice:scale-110 transition-transform" />
+                      <span className="text-[10px] font-bold uppercase tracking-widest hidden xs:block">{VOICES.find(v => v.id === selectedVoice)?.name.split(' (')[0]}</span>
+                    </button>
+                    <div className="w-px h-6 bg-zinc-800 shrink-0 mb-1.5" />
+                    <textarea
+                      ref={textareaRef}
+                      value={script}
+                      onChange={(e) => setScript(e.target.value)}
+                      onFocus={() => setIsFocused(true)}
+                      onBlur={() => setIsFocused(false)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                          e.preventDefault();
+                          generateFullVideo();
+                          (e.target as HTMLTextAreaElement).blur();
+                        }
+                      }}
+                      placeholder="Paste script... (Enter to execute)"
+                      className="flex-1 bg-transparent border-none text-[13px] text-zinc-200 placeholder:text-zinc-600 outline-none resize-none px-3 py-1.5 min-h-[36px] overflow-y-auto custom-scrollbar leading-relaxed"
+                      rows={1}
+                    />
+                    <button
+                      onClick={() => generateFullVideo()}
+                      disabled={isGenerating || !script.trim()}
+                      className="shrink-0 h-[36px] w-[36px] bg-orange-500 hover:bg-orange-600 text-black rounded-lg flex items-center justify-center shadow-lg shadow-orange-500/20 transition-all disabled:opacity-30 disabled:scale-100 active:scale-95"
+                      title="Generate Video"
+                    >
+                      {isGenerating ? <Loader2 size={16} className="animate-spin" /> : <Zap size={16} fill="currentColor" />}
+                    </button>
+                  </div>
               </div>
             </motion.div>
           )}
