@@ -41,14 +41,13 @@ let _aiInstances: any[] = [];
 let currentApiIndex = 0;
 
   // Helper for trying keys sequentially in case of 403 or quota limits
-  const generateContentWithRetry = async (geminiApiKeys: string[], params: any): Promise<any> => {
+const generateContentWithRetry = async (geminiApiKeys: string[], params: any): Promise<any> => {
     let keys = geminiApiKeys;
     if (!keys || keys.length === 0) {
       if (typeof window !== 'undefined') {
         const stored = localStorage.getItem('GEMINI_API_KEYS');
         if (stored) {
           try {
-            // Support both JSON array and flat string
             if (stored.startsWith('[')) {
               keys = JSON.parse(stored);
             } else {
@@ -64,16 +63,18 @@ let currentApiIndex = 0;
       throw new Error("No Gemini API keys found. Please configure them in Settings.");
     }
 
-    if (_aiInstances.length === 0 || _aiInstances.length !== keys.length) {
-      _aiInstances = keys.map((key: string) => new GoogleGenAI({ apiKey: key }));
-    }
-
     let lastError: any = null;
     let attempts = 0;
-    while (attempts < _aiInstances.length) {
-      const client = _aiInstances[currentApiIndex];
+    while (attempts < keys.length) {
+      // Modulo arithmetic to ensure index bounds, fallback to 0 if we added fewer keys than the index
+      if (currentApiIndex >= keys.length) {
+        currentApiIndex = 0;
+      }
+      
+      const client = new GoogleGenAI({ apiKey: keys[currentApiIndex] });
+      const currentAttemptIndex = currentApiIndex;
       // Move to next key for next time
-      currentApiIndex = (currentApiIndex + 1) % _aiInstances.length;
+      currentApiIndex = (currentApiIndex + 1) % keys.length;
       attempts++;
       
       try {
@@ -81,17 +82,19 @@ let currentApiIndex = 0;
         return res;
       } catch (err: any) {
         lastError = err;
-        const msg = err.message?.toLowerCase() || "";
-        // If it's a quota or rate limit error, we definitely want to rotate
+        const msg = (typeof err === 'string' ? err : (err.message || JSON.stringify(err) || "")).toLowerCase();
+        
         if (msg.includes('quota') || msg.includes('429') || msg.includes('limit') || msg.includes('exhausted')) {
-           console.warn(`Key ${currentApiIndex} exhausted, rotating...`);
+           console.warn(`Key ${currentAttemptIndex} exhausted, rotating...`);
            continue; 
         }
-        // For other errors, we still rotate to be safe
-        console.warn(`Key failed (attempt ${attempts}), rotating... Error:`, err.message || err);
+        console.warn(`Key failed (attempt ${attempts}), rotating... Error:`, err);
       }
     }
-    throw lastError || new Error("All API keys failed.");
+    
+    // If we get here, all attempts failed
+    const errorString = typeof lastError === 'string' ? lastError : (lastError.message || JSON.stringify(lastError));
+    throw new Error(`Exhausted all ${keys.length} provided Gemini API keys. Final error: ${errorString}`);
   };
 
 
@@ -319,6 +322,40 @@ export default function App() {
 
     const treeData: any[] = [];
     
+    // Generate SRT text
+    let srtText = "";
+    for (let i = 0; i < scenesData.length; i++) {
+        const scene = scenesData[i];
+        const nextTimestamp = i < scenesData.length - 1 ? scenesData[i+1].timestamp : scene.timestamp + 5; // guess 5s if last
+        
+        const formatTime = (seconds: number) => {
+            const h = Math.floor(seconds / 3600);
+            const m = Math.floor((seconds % 3600) / 60);
+            const s = Math.floor(seconds % 60);
+            const ms = Math.floor((seconds % 1) * 1000);
+            return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')},${ms.toString().padStart(3, '0')}`;
+        };
+
+        // Break text into lines
+        const words = scene.text.split(' ');
+        let chunks = [];
+        for (let j = 0; j < Math.max(1, words.length); j+=4) {
+            chunks.push(words.slice(j, j + 4).join(' '));
+        }
+
+        // We divide the scene's duration among the text chunks
+        const durationPerChunk = (nextTimestamp - scene.timestamp) / Math.max(1, chunks.length);
+        
+        for (let k = 0; k < chunks.length; k++) {
+            const startStr = formatTime(scene.timestamp + (k * durationPerChunk));
+            const endStr = formatTime(scene.timestamp + ((k + 1) * durationPerChunk));
+            srtText += `${i * 100 + k + 1}\n${startStr} --> ${endStr}\n<font color="#ffc400"><b>${chunks[k]}</b></font>\n\n`;
+        }
+    }
+    const srtBase64 = btoa(unescape(encodeURIComponent(srtText)));
+    const { data: srtBlob } = await octokit.git.createBlob({ owner, repo, content: srtBase64, encoding: 'base64' });
+    treeData.push({ path: `projects/${timestamp}/subtitles.srt`, mode: '100644', type: 'blob', sha: srtBlob.sha });
+
     for (const img of imagesPayload) {
       const { data: blob } = await octokit.git.createBlob({ owner, repo, content: img.base64, encoding: 'base64' });
       treeData.push({ path: `projects/${timestamp}/images/${img.filename}`, mode: '100644', type: 'blob', sha: blob.sha });
@@ -371,7 +408,10 @@ jobs:
               dir=$(dirname "$timeline")
               echo "Rendering $dir/output.mp4"
               cd "$dir"
-              ffmpeg -f concat -safe 0 -i timeline.txt -i "audio.wav" -c:v libx264 -pix_fmt yuv420p -c:a aac -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920" -shortest output.mp4
+              # First concat images with zoompan and correct 9:16 aspect ratio
+              # We use a filter_complex to map each image to a 6-second zoompan, then concat them. 
+              # Using a basic scale and subtitles.srt for text
+              ffmpeg -f concat -safe 0 -i timeline.txt -i "audio.wav" -c:v libx264 -pix_fmt yuv420p -c:a aac -vf "zoompan=z='min(zoom+0.0005,1.1)' :d=1 :x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)',scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,subtitles=subtitles.srt:force_style='FontName=Arial,FontSize=42,PrimaryColour=&H0000D0FF,BorderStyle=3,Outline=4,Shadow=2,MarginV=120'" -shortest output.mp4
               PROJECT_ID=$(basename "$dir")
               cd -
               gh release create "vid-\${PROJECT_ID}" "$dir/output.mp4" --title "Video \${PROJECT_ID}" --notes "Rendered MP4 via Actions" || true
@@ -870,7 +910,15 @@ jobs:
     const storedUrls = typeof window !== 'undefined' ? localStorage.getItem('IMAGE_WORKER_URLS') : null;
     
     if (storedUrls) {
-      workerUrls = storedUrls.split(/[,\s\n]+/).map(u => u.trim()).filter(Boolean);
+      try {
+        if (storedUrls.startsWith('[')) {
+          workerUrls = JSON.parse(storedUrls);
+        } else {
+          workerUrls = storedUrls.split(/[,\s\n]+/).map(u => u.trim()).filter(Boolean);
+        }
+      } catch (e) {
+        workerUrls = storedUrls.split(/[,\s\n]+/).map(u => u.trim()).filter(Boolean);
+      }
     }
 
     if (!workerUrls || workerUrls.length === 0) {
