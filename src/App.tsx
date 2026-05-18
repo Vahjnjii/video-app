@@ -47,7 +47,16 @@ let currentApiIndex = 0;
       if (typeof window !== 'undefined') {
         const stored = localStorage.getItem('GEMINI_API_KEYS');
         if (stored) {
-          keys = JSON.parse(stored);
+          try {
+            // Support both JSON array and flat string
+            if (stored.startsWith('[')) {
+              keys = JSON.parse(stored);
+            } else {
+              keys = stored.split(/[,\s\n]+/).map(k => k.trim()).filter(Boolean);
+            }
+          } catch(e) {
+            keys = stored.split(/[,\s\n]+/).map(k => k.trim()).filter(Boolean);
+          }
         }
       }
     }
@@ -55,14 +64,15 @@ let currentApiIndex = 0;
       throw new Error("No Gemini API keys found. Please configure them in Settings.");
     }
 
-    if (_aiInstances.length !== keys.length || !_aiInstances[0]?.apiKey || !keys.includes(_aiInstances[0]?.apiKey)) {
+    if (_aiInstances.length === 0 || _aiInstances.length !== keys.length) {
       _aiInstances = keys.map((key: string) => new GoogleGenAI({ apiKey: key }));
     }
 
-    let lastError = null;
+    let lastError: any = null;
     let attempts = 0;
     while (attempts < _aiInstances.length) {
       const client = _aiInstances[currentApiIndex];
+      // Move to next key for next time
       currentApiIndex = (currentApiIndex + 1) % _aiInstances.length;
       attempts++;
       
@@ -71,9 +81,14 @@ let currentApiIndex = 0;
         return res;
       } catch (err: any) {
         lastError = err;
+        const msg = err.message?.toLowerCase() || "";
+        // If it's a quota or rate limit error, we definitely want to rotate
+        if (msg.includes('quota') || msg.includes('429') || msg.includes('limit') || msg.includes('exhausted')) {
+           console.warn(`Key ${currentApiIndex} exhausted, rotating...`);
+           continue; 
+        }
+        // For other errors, we still rotate to be safe
         console.warn(`Key failed (attempt ${attempts}), rotating... Error:`, err.message || err);
-        // If it's not a generic retryable error or leaked key, maybe break?
-        // Let's just retry for any error.
       }
     }
     throw lastError || new Error("All API keys failed.");
@@ -852,27 +867,20 @@ jobs:
 
   const generateImageFromProviders = async (prompt: string): Promise<Blob> => {
     let workerUrls = imageUrls;
+    const storedUrls = typeof window !== 'undefined' ? localStorage.getItem('IMAGE_WORKER_URLS') : null;
+    
+    if (storedUrls) {
+      workerUrls = storedUrls.split(/[,\s\n]+/).map(u => u.trim()).filter(Boolean);
+    }
+
     if (!workerUrls || workerUrls.length === 0) {
-      let workerUrlsString = '';
-      if (typeof window !== 'undefined') {
-        workerUrlsString = localStorage.getItem('IMAGE_WORKER_URLS') || '';
-      }
-      
       // Default fallback URLs if none provided
-      const defaultUrls = [
+      workerUrls = [
         "https://flux1.shreevathsa2k27.workers.dev/",
         "https://flux.shreevathsa2k21-4fa.workers.dev/",
         "https://flux.vaishakhaphotos2.workers.dev/",
         "https://flux.vmajibail.workers.dev/"
       ];
-
-      workerUrls = defaultUrls;
-      if (workerUrlsString) {
-        const parsedUrls = workerUrlsString.split(',').map(u => u.trim()).filter(u => u);
-        if (parsedUrls.length > 0) {
-          workerUrls = parsedUrls;
-        }
-      }
     }
 
     // Shuffle the URLs to distribute the load randomly per request
@@ -893,8 +901,13 @@ jobs:
         if (!response.ok) {
           const errorText = await response.text();
           console.error(`[Flux Frontend Error] ${workerUrl}:`, response.status, errorText);
-          lastError = { status: response.status, text: errorText };
-          continue; 
+          
+          // If 429 or 5xx, try next one
+          if (response.status === 429 || response.status >= 500) {
+            lastError = { status: response.status, text: errorText };
+            continue;
+          }
+          throw new Error(errorText || `HTTP ${response.status}`);
         }
 
         const arrayBuffer = await response.arrayBuffer();
@@ -2130,23 +2143,23 @@ jobs:
                       <h3 className="text-sm font-bold text-zinc-400 uppercase tracking-widest border-b border-zinc-800 pb-2">API Keys & Workers</h3>
                       
                       <div className="space-y-2">
-                        <label className="text-xs text-zinc-500 font-bold uppercase block">Gemini API Keys (comma separated)</label>
+                        <label className="text-xs text-zinc-500 font-bold uppercase block">Gemini API Keys (comma or line separated)</label>
                         <textarea 
                           value={apiKeysInputText}
                           onChange={(e) => setApiKeysInputText(e.target.value)}
                           className="w-full bg-black border border-zinc-800 rounded-lg p-3 text-sm font-mono text-zinc-300 placeholder:text-zinc-700 outline-none focus:border-orange-500 transition-colors"
-                          placeholder="AIzaSy... , AIzaSy..."
+                          placeholder="AIzaSy...&#10;AIzaSy..."
                           rows={2}
                         />
                       </div>
 
                       <div className="space-y-2">
-                        <label className="text-xs text-zinc-500 font-bold uppercase block">Flux Image Worker URLs (comma separated)</label>
+                        <label className="text-xs text-zinc-500 font-bold uppercase block">Flux Image Worker URLs (comma or line separated)</label>
                         <textarea 
                           value={imageUrlsInputText}
                           onChange={(e) => setImageUrlsInputText(e.target.value)}
                           className="w-full bg-black border border-zinc-800 rounded-lg p-3 text-sm font-mono text-zinc-300 placeholder:text-zinc-700 outline-none focus:border-orange-500 transition-colors"
-                          placeholder="https://flux...workers.dev , ..."
+                          placeholder="https://flux...workers.dev&#10;https://flux..."
                           rows={3}
                         />
                       </div>
@@ -2162,8 +2175,8 @@ jobs:
                         onClick={async () => {
                           setSaveStatus({ type: 'saving', message: 'Saving configuration...' });
                           try {
-                            const newApiKeys = apiKeysInputText.split(',').map(s => s.trim()).filter(Boolean);
-                            const newImageUrls = imageUrlsInputText.split(',').map(s => s.trim()).filter(Boolean);
+                            const newApiKeys = apiKeysInputText.split(/[,\s\n]+/).map(s => s.trim()).filter(Boolean);
+                            const newImageUrls = imageUrlsInputText.split(/[,\s\n]+/).map(s => s.trim()).filter(Boolean);
                             
                             setApiKeys(newApiKeys);
                             setImageUrls(newImageUrls);
