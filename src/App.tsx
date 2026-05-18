@@ -176,6 +176,17 @@ export default function App() {
           setScript(decodedScript);
           setOriginalScript(decodedScript);
 
+          // Try to fetch metadata for advanced recovery (subtitles, prompts)
+          let metadata = null;
+          try {
+            const { data: metaContent } = await octokit.repos.getContent({
+              owner, repo, path: `projects/${selectedProjectId}/metadata.json`
+            }) as any;
+            metadata = JSON.parse(decodeURIComponent(escape(atob(metaContent.content))));
+          } catch (e) {
+            console.log("No metadata.json found, falling back to timeline parsing");
+          }
+
           // Fetch timeline
           const { data: timelineContent } = await octokit.repos.getContent({
             owner, repo, path: `projects/${selectedProjectId}/timeline.txt`
@@ -184,6 +195,8 @@ export default function App() {
           
           // Reconstruct scenes
           const reconstructedScenes: Scene[] = [];
+          let currentTimestamp = 0;
+          let sceneIdx = 0;
           for (let i = 0; i < timelineLines.length; i++) {
             const line = timelineLines[i];
             if (line.startsWith('file ')) {
@@ -196,25 +209,22 @@ export default function App() {
               const duration = durationLine?.startsWith('duration ') ? parseFloat(durationLine.replace('duration ', '')) : 5;
               
               reconstructedScenes.push({
-                timestamp: duration,
-                prompt: `Fetched Scene ${reconstructedScenes.length + 1}`,
-                text: "Loading transcript...", // We'd ideally store this in metadata or parse audio
+                timestamp: currentTimestamp,
+                prompt: metadata?.scenes[sceneIdx]?.prompt || `Scene ${sceneIdx + 1}`,
+                text: metadata?.scenes[sceneIdx]?.text || "...",
                 imageUrl: `data:image/webp;base64,${imgData.content.replace(/\s/g, '')}`
               });
+              currentTimestamp += duration;
+              sceneIdx++;
               i++; // Skip duration line
             }
           }
           setScenes(reconstructedScenes);
           
-          // Audio loading
-          try {
-            const { data: audioData } = await octokit.repos.getContent({
-              owner, repo, path: `projects/${selectedProjectId}/audio.wav`
-            }) as any;
-            setAudioUrl(`data:audio/wav;base64,${audioData.content.replace(/\s/g, '')}`);
-          } catch (e) {
-            console.error("Audio fetch failed", e);
-          }
+          const { data: audioData } = await octokit.repos.getContent({
+            owner, repo, path: `projects/${selectedProjectId}/audio.wav`
+          }) as any;
+          setAudioUrl(`data:audio/wav;base64,${audioData.content.replace(/\s/g, '')}`);
 
         } catch (error) {
           console.error("Failed to load project details:", error);
@@ -225,7 +235,7 @@ export default function App() {
       
       loadProjectData();
     }
-  }, [selectedProjectId]);
+  }, [selectedProjectId, githubToken, user]);
 
   const [showVoiceSelector, setShowVoiceSelector] = useState(false);
 
@@ -259,7 +269,8 @@ export default function App() {
     audioBase64: string,
     imagesPayload: { filename: string, base64: string }[],
     timelineText: string,
-    scriptText: string
+    scriptText: string,
+    scenesData: Scene[]
   ) => {
     const owner = userLogin;
     const repo = 'ai-studio-video-projects';
@@ -301,13 +312,18 @@ export default function App() {
     const { data: audioBlob } = await octokit.git.createBlob({ owner, repo, content: audioBase64, encoding: 'base64' });
     treeData.push({ path: `projects/${timestamp}/audio.wav`, mode: '100644', type: 'blob', sha: audioBlob.sha });
 
-    const timelineBase64 = btoa(encodeURIComponent(timelineText).replace(/%([0-9A-F]{2})/g, (m, p1) => String.fromCharCode(parseInt(p1, 16))));
+    const timelineBase64 = btoa(unescape(encodeURIComponent(timelineText)));
     const { data: timelineBlob } = await octokit.git.createBlob({ owner, repo, content: timelineBase64, encoding: 'base64' });
     treeData.push({ path: `projects/${timestamp}/timeline.txt`, mode: '100644', type: 'blob', sha: timelineBlob.sha });
 
-    const scriptBase64 = btoa(encodeURIComponent(scriptText).replace(/%([0-9A-F]{2})/g, (m, p1) => String.fromCharCode(parseInt(p1, 16))));
+    const scriptBase64 = btoa(unescape(encodeURIComponent(scriptText)));
     const { data: scriptBlob } = await octokit.git.createBlob({ owner, repo, content: scriptBase64, encoding: 'base64' });
     treeData.push({ path: `projects/${timestamp}/script.txt`, mode: '100644', type: 'blob', sha: scriptBlob.sha });
+
+    const metaDataString = JSON.stringify({ scenes: scenesData.map(s => ({ prompt: s.prompt, text: s.text, timestamp: s.timestamp })) });
+    const metaBase64 = btoa(unescape(encodeURIComponent(metaDataString)));
+    const { data: metaBlob } = await octokit.git.createBlob({ owner, repo, content: metaBase64, encoding: 'base64' });
+    treeData.push({ path: `projects/${timestamp}/metadata.json`, mode: '100644', type: 'blob', sha: metaBlob.sha });
 
     const workflowContent = `name: Render Video
 
@@ -340,7 +356,7 @@ jobs:
               dir=$(dirname "$timeline")
               echo "Rendering $dir/output.mp4"
               cd "$dir"
-              ffmpeg -f concat -safe 0 -i timeline.txt -i "audio.wav" -c:v libx264 -pix_fmt yuv420p -c:a aac -vf "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2" -shortest output.mp4
+              ffmpeg -f concat -safe 0 -i timeline.txt -i "audio.wav" -c:v libx264 -pix_fmt yuv420p -c:a aac -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920" -shortest output.mp4
               PROJECT_ID=$(basename "$dir")
               cd -
               gh release create "vid-\${PROJECT_ID}" "$dir/output.mp4" --title "Video \${PROJECT_ID}" --notes "Rendered MP4 via Actions" || true
@@ -556,8 +572,8 @@ jobs:
   }, [script, isFocused]);
 
   // Constants for 9:16 video
-  const CANVAS_WIDTH = 720;
-  const CANVAS_HEIGHT = 1280;
+  const CANVAS_WIDTH = 1080;
+  const CANVAS_HEIGHT = 1920;
 
   useEffect(() => {
     if (audioRef.current) {
@@ -745,25 +761,32 @@ jobs:
   const handleRecordVideo = async () => {
     if (!canvasRef.current || !audioUrl) return;
     
-    console.log("Starting high-quality recording...");
+    try {
+      await document.fonts.ready;
+    } catch (e) {
+      console.warn("Font pre-load readiness failed, proceeding anyway", e);
+    }
+    console.log("Starting high-quality recording (9:16)...");
+    
     const canvas = canvasRef.current;
+    // Force specific bitrates and 60fps for maximum quality
+    const stream = canvas.captureStream(60);
     
-    // Capture stream at 30fps
-    const stream = canvas.captureStream(30);
-    
-    // Audio capture
     const audio = audioRef.current;
     if (!audio) return;
     
-    audio.currentTime = 0;
-    const audioStream = (audio as any).captureStream ? (audio as any).captureStream() : null;
-    if (audioStream) {
-      audioStream.getAudioTracks().forEach((track: MediaStreamTrack) => stream.addTrack(track));
-    }
+    const audioCtx = new AudioContext();
+    if (audioCtx.state === 'suspended') await audioCtx.resume();
+    const source = audioCtx.createMediaElementSource(audio);
+    const dest = audioCtx.createMediaStreamDestination();
+    source.connect(dest);
+    source.connect(audioCtx.destination);
+    
+    dest.stream.getAudioTracks().forEach(track => stream.addTrack(track));
 
     const recorder = new MediaRecorder(stream, {
-      mimeType: 'video/webm;codecs=vp9',
-      videoBitsPerSecond: 12000000 // 12Mbps for high quality
+      mimeType: 'video/webm;codecs=vp9,opus',
+      videoBitsPerSecond: 25000000 // 25Mbps for ultra quality
     });
 
     const chunks: Blob[] = [];
@@ -774,20 +797,23 @@ jobs:
     recorder.onstop = () => {
       const blob = new Blob(chunks, { type: 'video/webm' });
       (window as any)._finalVideoBlob = blob;
-      console.log("Final video blob ready!");
+      console.log("Final video blob ready (9:16 aspect ratio confirmed)");
     };
 
     recorder.start();
-    handlePlay();
+    audio.currentTime = 0;
+    setTimeout(() => {
+      handlePlay();
+    }, 500); // Slight delay to ensure recorder is ready
     
-    // Auto stop when audio ends
     const checkEnd = setInterval(() => {
-      if (audio.ended || audio.currentTime >= audio.duration - 0.1) {
+      if (audio.ended || audio.currentTime >= audio.duration - 0.05) {
         clearInterval(checkEnd);
         recorder.stop();
         handlePause();
+        console.log("Recording stopped at end of audio.");
       }
-    }, 500);
+    }, 100);
   };
 
   const handlePause = () => {
@@ -1078,6 +1104,8 @@ jobs:
         const scene = scenePlan[i];
         const nextTimestamp = i < scenePlan.length - 1 ? scenePlan[i + 1].timestamp : audioDuration;
         const duration = Math.max(0.1, nextTimestamp - scene.timestamp);
+        
+        // Find matching blob or capture from canvas if possible
         const b = gatheredBlobs[i];
         
         if (b) {
@@ -1098,7 +1126,7 @@ jobs:
       const timestamp = Date.now().toString();
       const octokit = new Octokit({ auth: githubToken });
       
-      await uploadProjectToGitHub(octokit, user.login, timestamp, audioBase64, imagesPayload, timelineText, textToUse);
+      await uploadProjectToGitHub(octokit, user.login, timestamp, audioBase64, imagesPayload, timelineText, textToUse, scenePlan);
 
       setStatus('Deployed! Check GitHub Releases for mp4.');
       
@@ -1209,7 +1237,7 @@ jobs:
     if (particlesRef.current.length === 0) initParticles();
 
     const render = (time: number) => {
-      if (!ctx) return;
+      if (!ctx || scenes.length === 0) return;
       
       const audioTime = audioRef.current?.currentTime || 0;
       const SCENE_DURATION = 5;
@@ -1224,6 +1252,8 @@ jobs:
         }
       }
       const currentScene = scenes[sceneIndex];
+      if (!currentScene) return; // double check
+
       const sceneStart = currentScene.timestamp;
       const nextScene = scenes[sceneIndex + 1];
       const sceneEnd = nextScene ? nextScene.timestamp : duration;
@@ -1430,11 +1460,11 @@ jobs:
           chunkText = chunkText.charAt(0).toUpperCase() + chunkText.slice(1);
         }
 
-        ctx.font = '700 54px "Dancing Script", cursive';
+        ctx.font = 'bold 84px "Dancing Script", cursive';
         
         const x = CANVAS_WIDTH / 2;
-        const y = CANVAS_HEIGHT * 0.68; // Moved up slightly more (1cm approx)
-        const lineHeight = 70; 
+        const y = CANVAS_HEIGHT * 0.75; 
+        const lineHeight = 110; 
 
         // Split words to handle line-breaking for chunks of 4 words
         const chunkWords = chunkText.split(' ');
@@ -1454,15 +1484,18 @@ jobs:
 
           // Intense Dark Glow Outline
           ctx.save();
-          ctx.shadowColor = 'rgba(0, 0, 0, 0.95)';
-          ctx.shadowBlur = 22;
-          ctx.lineWidth = 10;
+          ctx.shadowColor = 'rgba(0, 0, 0, 1)';
+          ctx.shadowBlur = 35;
+          ctx.lineWidth = 14;
           ctx.strokeStyle = '#000000';
           ctx.strokeText(line, x, lineY);
           ctx.restore();
 
-          // Subtitle Text
-          ctx.fillStyle = '#FFFFFF';
+          // Subtitle Text (Strong Yellow/Orange gradient for luxury feel)
+          const textGrad = ctx.createLinearGradient(x, lineY - 40, x, lineY + 40);
+          textGrad.addColorStop(0, '#FFFFFF');
+          textGrad.addColorStop(1, '#ffc400');
+          ctx.fillStyle = textGrad;
           ctx.fillText(line, x, lineY);
         });
 
