@@ -40,65 +40,17 @@ import { GoogleGenAI, Modality } from "@google/genai";
 let _aiInstances: any[] = [];
 let currentApiIndex = 0;
 
-  // Helper for trying keys sequentially in case of 403 or quota limits
-const generateContentWithRetry = async (geminiApiKeys: string[], params: any): Promise<any> => {
-    let keys = geminiApiKeys;
-    if (!keys || keys.length === 0) {
-      if (typeof window !== 'undefined') {
-        const stored = localStorage.getItem('GEMINI_API_KEYS');
-        if (stored) {
-          try {
-            if (stored.startsWith('[')) {
-              keys = JSON.parse(stored);
-            } else {
-              keys = stored.split(/[,\s\n]+/).map(k => k.trim()).filter(Boolean);
-            }
-          } catch(e) {
-            keys = stored.split(/[,\s\n]+/).map(k => k.trim()).filter(Boolean);
-          }
-        }
-      }
+  const generateContentWithRetry = async (params: any): Promise<any> => {
+    const response = await fetch('/api/gemini/generate', {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params)
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+      throw new Error(err.error || err.message || "Failed to generate content");
     }
-    if (!keys || keys.length === 0) {
-      throw new Error("No Gemini API keys found. Please configure them in Settings.");
-    }
-
-    const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
-
-    let lastError: any = null;
-    let attempts = 0;
-    while (attempts < keys.length) {
-      // Modulo arithmetic to ensure index bounds, fallback to 0 if we added fewer keys than the index
-      if (currentApiIndex >= keys.length) {
-        currentApiIndex = 0;
-      }
-      
-      const client = new GoogleGenAI({ apiKey: keys[currentApiIndex] });
-      const currentAttemptIndex = currentApiIndex;
-      // Move to next key for next time
-      currentApiIndex = (currentApiIndex + 1) % keys.length;
-      attempts++;
-      
-      try {
-        const res = await client.models.generateContent(params);
-        return res;
-      } catch (err: any) {
-        lastError = err;
-        const msg = (typeof err === 'string' ? err : (err.message || JSON.stringify(err) || "")).toLowerCase();
-        
-        if (msg.includes('quota') || msg.includes('429') || msg.includes('limit') || msg.includes('exhausted')) {
-           console.warn(`Key ${currentAttemptIndex} exhausted, rotating...`);
-           if (attempts < keys.length) await sleep(2000); // Wait 2s to allow rate limits to reset slightly
-           continue; 
-        }
-        console.warn(`Key failed (attempt ${attempts}), rotating... Error:`, err);
-        if (attempts < keys.length) await sleep(1000);
-      }
-    }
-    
-    // If we get here, all attempts failed
-    const errorString = typeof lastError === 'string' ? lastError : (lastError.message || JSON.stringify(lastError));
-    throw new Error(`Exhausted all ${keys.length} provided Gemini API keys. (If you created them in the SAME Google Cloud / AI Studio project, they share the SAME free tier limits). Final error: ${errorString}`);
+    return response.json();
   };
 
 
@@ -147,8 +99,6 @@ export default function App() {
   const [githubToken, setGithubToken] = useState<string | null>(null);
   const [githubTokenInput, setGithubTokenInput] = useState('');
   const [isAuthLoading, setIsAuthLoading] = useState(true);
-  const [apiKeys, setApiKeys] = useState<string[]>([]);
-  const [imageUrls, setImageUrls] = useState<string[]>([]);
   const [dbProjects, setDbProjects] = useState<Project[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(() => {
     if (typeof window !== 'undefined') {
@@ -264,8 +214,6 @@ export default function App() {
   // Base state
   const [script, setScript] = useState('');
   const [originalScript, setOriginalScript] = useState('');
-  const [apiKeysInputText, setApiKeysInputText] = useState('');
-  const [imageUrlsInputText, setImageUrlsInputText] = useState('');
   const [saveStatus, setSaveStatus] = useState<{ type: 'idle' | 'saving' | 'success' | 'error', message: string }>({ type: 'idle', message: '' });
   const [selectedVoice, setSelectedVoice] = useState('Charon');
   const [isGenerating, setIsGenerating] = useState(false);
@@ -496,16 +444,7 @@ jobs:
       const { data: gists } = await octokit.gists.list();
       const settingsGist = gists.find(g => g.description === 'AI Studio Video Settings');
       if (settingsGist) {
-        const { data: gist } = await octokit.gists.get({ gist_id: settingsGist.id });
-        if (gist.files && gist.files['settings.json'] && gist.files['settings.json'].content) {
-          const settingsObj = JSON.parse(gist.files['settings.json'].content);
-          const keysArray = settingsObj.geminiApiKeys || [];
-          const urlsArray = settingsObj.imageWorkerUrls || [];
-          setApiKeys(keysArray);
-          setImageUrls(urlsArray);
-          setApiKeysInputText(keysArray.join(', '));
-          setImageUrlsInputText(urlsArray.join(', '));
-        }
+        // We no longer load settings from gist as they are backend protected
       }
 
       // Fetch Projects mapping
@@ -531,23 +470,6 @@ jobs:
   }, [githubToken, user, dbProjects]);
 
   useEffect(() => {
-    // Load local settings first
-    const localKeys = localStorage.getItem('GEMINI_API_KEYS');
-    if (localKeys) {
-      try {
-        const parsed = JSON.parse(localKeys);
-        setApiKeys(parsed);
-        setApiKeysInputText(parsed.join(', '));
-      } catch(e) {}
-    }
-    
-    const localUrls = localStorage.getItem('IMAGE_WORKER_URLS');
-    if (localUrls) {
-      const urlsArray = localUrls.split(',').filter(Boolean);
-      setImageUrls(urlsArray);
-      setImageUrlsInputText(urlsArray.join(', '));
-    }
-
     const storedToken = localStorage.getItem('GITHUB_TOKEN');
     if (storedToken) {
       fetchUserData(storedToken);
@@ -572,10 +494,6 @@ jobs:
     localStorage.removeItem('GITHUB_TOKEN');
     setGithubToken(null);
     setUser(null);
-    setApiKeys([]);
-    setImageUrls([]);
-    setApiKeysInputText('');
-    setImageUrlsInputText('');
     setSaveStatus({ type: 'idle', message: '' });
     setDbProjects([]);
   };
@@ -655,7 +573,7 @@ jobs:
 
   const generateVoiceover = async (targetScript: string): Promise<{duration: number, base64: string}> => {
     setStatus('Synthesizing voice...');
-    const ttsResponse = await generateContentWithRetry(apiKeys, {
+    const ttsResponse = await generateContentWithRetry({
       model: "gemini-3.1-flash-tts-preview",
       contents: [{ parts: [{ text: targetScript }] }],
       config: {
@@ -910,103 +828,17 @@ jobs:
   };
 
   const generateImageFromProviders = async (prompt: string): Promise<Blob> => {
-    let workerUrls = imageUrls;
-    const storedUrls = typeof window !== 'undefined' ? localStorage.getItem('IMAGE_WORKER_URLS') : null;
-    
-    if (storedUrls) {
-      try {
-        if (storedUrls.startsWith('[')) {
-          workerUrls = JSON.parse(storedUrls);
-        } else {
-          workerUrls = storedUrls.split(/[,\s\n]+/).map(u => u.trim()).filter(Boolean);
-        }
-      } catch (e) {
-        workerUrls = storedUrls.split(/[,\s\n]+/).map(u => u.trim()).filter(Boolean);
-      }
+    const response = await fetch('/api/flux/generate', {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt }),
+      signal: AbortSignal.timeout(60000)
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+      throw new Error(err.error || err.message || "Failed to generate image");
     }
-
-    if (!workerUrls || workerUrls.length === 0) {
-      // Default fallback URLs if none provided
-      workerUrls = [
-        "https://flux1.shreevathsa2k27.workers.dev/",
-        "https://flux.shreevathsa2k21-4fa.workers.dev/",
-        "https://flux.vaishakhaphotos2.workers.dev/",
-        "https://flux.vmajibail.workers.dev/"
-      ];
-    }
-
-    // Shuffle the URLs to distribute the load randomly per request
-    const shuffledUrls = [...workerUrls].sort(() => Math.random() - 0.5);
-
-    let lastError = null;
-
-    for (const workerUrl of shuffledUrls) {
-      try {
-        console.log(`[Flux Proxy Frontend] Trying URL: ${workerUrl}`);
-        const response = await fetch(workerUrl.trim(), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ prompt }),
-          signal: AbortSignal.timeout(15000)
-        });
-
-        if (!response.ok) {
-          const errorText = await response.text();
-          console.error(`[Flux Frontend Error] ${workerUrl}:`, response.status, errorText);
-          
-          // If 429 or 5xx, try next one
-          if (response.status === 429 || response.status >= 500) {
-            lastError = { status: response.status, text: errorText };
-            continue;
-          }
-          throw new Error(errorText || `HTTP ${response.status}`);
-        }
-
-        const arrayBuffer = await response.arrayBuffer();
-        let uintArray = new Uint8Array(arrayBuffer);
-
-        if (uintArray[0] === 123) { // '{' character, possible JSON
-          const textData = new TextDecoder("utf-8").decode(uintArray);
-          try {
-            const json = JSON.parse(textData);
-            const b64 = json.image || json.result?.image || json.img;
-            if (b64) {
-              const base64Data = b64.replace(/^data:image\/\w+;base64,/, "");
-              const binStr = atob(base64Data);
-              const binArr = new Uint8Array(binStr.length);
-              for (let i = 0; i < binStr.length; i++) {
-                binArr[i] = binStr.charCodeAt(i);
-              }
-              return new Blob([binArr], { type: "image/jpeg" });
-            }
-          } catch (e) {
-            console.error("JSON parse failed", e);
-          }
-        }
-        
-        return new Blob([arrayBuffer], { type: "image/jpeg" });
-
-      } catch (error: any) {
-        console.error(`[Flux Proxy Exception] ${workerUrl}:`, error.message);
-        lastError = { status: 500, text: error.message };
-        continue;
-      }
-    }
-
-    try {
-      console.log(`[Flux Frontend] Using Pollinations fallback`);
-      const response = await fetch(`https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=720&height=1280&nologo=true`, {
-        signal: AbortSignal.timeout(15000)
-      });
-      if (response.ok) {
-        const arrayBuffer = await response.arrayBuffer();
-        return new Blob([arrayBuffer], { type: "image/jpeg" });
-      }
-    } catch (e) {
-      console.error("[Flux Proxy] Pollinations fallback failed:", e);
-    }
-
-    throw new Error(lastError?.text || "All workers failed");
+    return response.blob();
   };
 
   const regenerateImage = async (index: number) => {
@@ -1073,7 +905,7 @@ jobs:
       const { duration: audioDuration, base64: audioBase64 } = await generateVoiceover(textToUse);
       setStatus('Planning story based on audio duration...');
       
-      const planResponse = await generateContentWithRetry(apiKeys, {
+      const planResponse = await generateContentWithRetry({
         model: "gemini-3-flash-preview",
         contents: [{ parts: [{ text: textToUse }] }],
         config: {
@@ -2192,102 +2024,27 @@ jobs:
                     </div>
 
                     <div className="space-y-4">
-                      <h3 className="text-sm font-bold text-zinc-400 uppercase tracking-widest border-b border-zinc-800 pb-2">API Keys & Workers</h3>
+                      <h3 className="text-sm font-bold text-zinc-400 uppercase tracking-widest border-b border-zinc-800 pb-2">Backend Secured</h3>
                       
-                      <div className="space-y-2">
-                        <label className="text-xs text-zinc-500 font-bold uppercase block">Gemini API Keys (comma or line separated)</label>
-                        <textarea 
-                          value={apiKeysInputText}
-                          onChange={(e) => setApiKeysInputText(e.target.value)}
-                          className="w-full bg-black border border-zinc-800 rounded-lg p-3 text-sm font-mono text-zinc-300 placeholder:text-zinc-700 outline-none focus:border-orange-500 transition-colors"
-                          placeholder="AIzaSy...&#10;AIzaSy..."
-                          rows={2}
-                        />
+                      <div className="p-4 rounded-lg bg-zinc-900 border border-zinc-800 text-sm text-zinc-400">
+                        <p className="mb-2"><strong className="text-zinc-200">Backend Secured Configuration</strong></p>
+                        <p>
+                          Gemini API Keys and Image Worker URLs are now safely stored strictly in the backend environment variables (.env file). 
+                          They are no longer stored in GitHub Gists or the browser's localStorage for security reasons.
+                        </p>
                       </div>
-
-                      <div className="space-y-2">
-                        <label className="text-xs text-zinc-500 font-bold uppercase block">Flux Image Worker URLs (comma or line separated)</label>
-                        <textarea 
-                          value={imageUrlsInputText}
-                          onChange={(e) => setImageUrlsInputText(e.target.value)}
-                          className="w-full bg-black border border-zinc-800 rounded-lg p-3 text-sm font-mono text-zinc-300 placeholder:text-zinc-700 outline-none focus:border-orange-500 transition-colors"
-                          placeholder="https://flux...workers.dev&#10;https://flux..."
-                          rows={3}
-                        />
-                      </div>
-                      
-                      {saveStatus.message && (
-                        <div className={`p-3 rounded-lg text-sm flex items-center gap-2 ${saveStatus.type === 'error' ? 'bg-red-500/20 text-red-400' : saveStatus.type === 'success' ? 'bg-green-500/20 text-green-400' : 'bg-orange-500/20 text-orange-400'}`}>
-                           {saveStatus.type === 'saving' && <Loader2 size={14} className="animate-spin" />}
-                           {saveStatus.message}
-                        </div>
-                      )}
-                      
-                      <button 
-                        onClick={async () => {
-                          setSaveStatus({ type: 'saving', message: 'Saving configuration...' });
-                          try {
-                            const newApiKeys = apiKeysInputText.split(/[,\s\n]+/).map(s => s.trim()).filter(Boolean);
-                            const newImageUrls = imageUrlsInputText.split(/[,\s\n]+/).map(s => s.trim()).filter(Boolean);
-                            
-                            setApiKeys(newApiKeys);
-                            setImageUrls(newImageUrls);
-
-                            localStorage.setItem('GEMINI_API_KEYS', JSON.stringify(newApiKeys));
-                            if (newImageUrls.length > 0) {
-                              localStorage.setItem('IMAGE_WORKER_URLS', newImageUrls.join(','));
-                            }
-
-                            if (githubToken) {
-                              const octokit = new Octokit({ auth: githubToken });
-                              const settingsObj = JSON.stringify({ geminiApiKeys: newApiKeys, imageWorkerUrls: newImageUrls }, null, 2);
-                              
-                              const { data: gists } = await octokit.gists.list();
-                              const settingsGist = gists.find(g => g.description === 'AI Studio Video Settings');
-                              
-                              if (settingsGist) {
-                                 await octokit.gists.update({
-                                   gist_id: settingsGist.id,
-                                   description: 'AI Studio Video Settings',
-                                   files: { 'settings.json': { content: settingsObj } }
-                                 });
-                              } else {
-                                 await octokit.gists.create({
-                                   description: 'AI Studio Video Settings',
-                                   public: false,
-                                   files: { 'settings.json': { content: settingsObj } }
-                                 });
-                              }
-                              setSaveStatus({ type: 'success', message: 'Settings saved to Cloud and Local!' });
-                            } else {
-                              setSaveStatus({ type: 'success', message: 'Settings saved locally.' });
-                            }
-                            setTimeout(() => setSaveStatus({ type: 'idle', message: '' }), 5000);
-                          } catch(e: any) {
-                            if (e.name === 'QuotaExceededError' || e.message?.includes('quota')) {
-                               setSaveStatus({ type: 'error', message: 'Browser Storage Full. Please use "Clear Local Cache" below.' });
-                            } else {
-                               setSaveStatus({ type: 'error', message: 'Save Failed: ' + e.message });
-                            }
-                          }
-                        }}
-                        disabled={saveStatus.type === 'saving'}
-                        className="w-full bg-orange-500 hover:bg-orange-600 text-black font-bold py-2.5 rounded-lg transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
-                      >
-                         Save Configuration
-                      </button>
 
                       <div className="pt-4 border-t border-zinc-800 flex flex-col gap-2">
                         <button 
                           onClick={() => {
-                            if (confirm("This will clear your local API keys and token. You will need to login again. Continue?")) {
+                            if (confirm("This will clear your local GitHub token. You will need to login again. Continue?")) {
                               localStorage.clear();
                               window.location.reload();
                             }
                           }}
                           className="w-full bg-zinc-900 border border-zinc-800 text-zinc-500 hover:text-red-400 py-2 rounded-lg text-xs transition-colors"
                         >
-                          Clear Local Cache (Fix Quota Error)
+                          Clear Local Cache
                         </button>
                       </div>
                     </div>
