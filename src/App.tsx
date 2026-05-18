@@ -63,6 +63,8 @@ const generateContentWithRetry = async (geminiApiKeys: string[], params: any): P
       throw new Error("No Gemini API keys found. Please configure them in Settings.");
     }
 
+    const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
     let lastError: any = null;
     let attempts = 0;
     while (attempts < keys.length) {
@@ -86,15 +88,17 @@ const generateContentWithRetry = async (geminiApiKeys: string[], params: any): P
         
         if (msg.includes('quota') || msg.includes('429') || msg.includes('limit') || msg.includes('exhausted')) {
            console.warn(`Key ${currentAttemptIndex} exhausted, rotating...`);
+           if (attempts < keys.length) await sleep(2000); // Wait 2s to allow rate limits to reset slightly
            continue; 
         }
         console.warn(`Key failed (attempt ${attempts}), rotating... Error:`, err);
+        if (attempts < keys.length) await sleep(1000);
       }
     }
     
     // If we get here, all attempts failed
     const errorString = typeof lastError === 'string' ? lastError : (lastError.message || JSON.stringify(lastError));
-    throw new Error(`Exhausted all ${keys.length} provided Gemini API keys. Final error: ${errorString}`);
+    throw new Error(`Exhausted all ${keys.length} provided Gemini API keys. (If you created them in the SAME Google Cloud / AI Studio project, they share the SAME free tier limits). Final error: ${errorString}`);
   };
 
 
