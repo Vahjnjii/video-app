@@ -2,7 +2,6 @@ import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
-import fetch from "node-fetch";
 
 const app = express();
 const PORT = 3000;
