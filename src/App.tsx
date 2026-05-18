@@ -40,11 +40,11 @@ import { GoogleGenAI, Modality } from "@google/genai";
 let _aiInstances: any[] = [];
 let currentApiIndex = 0;
 
-  const generateContentWithRetry = async (params: any): Promise<any> => {
+  const generateContentWithRetry = async (params: any, clientProvidedKeys?: string[]): Promise<any> => {
     const response = await fetch('/api/gemini/generate', {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...params, clientProvidedKeys: apiKeys })
+      body: JSON.stringify({ ...params, clientProvidedKeys })
     });
     if (!response.ok) {
       const err = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
@@ -609,7 +609,7 @@ jobs:
           },
         },
       },
-    });
+    }, apiKeys);
 
     const base64Audio = ttsResponse.candidates?.[0]?.content?.parts?.find(p => p.inlineData)?.inlineData?.data;
     if (!base64Audio) throw new Error("Voiceover failed.");
@@ -945,7 +945,7 @@ jobs:
           Output as a clean JSON array of objects. No extra text or explanations.`,
           responseMimeType: "application/json",
         }
-      });
+      }, apiKeys);
 
       let text = planResponse.text;
       if (!text) throw new Error("Planning failed.");
