@@ -40,18 +40,63 @@ import { GoogleGenAI, Modality } from "@google/genai";
 let _aiInstances: any[] = [];
 let currentApiIndex = 0;
 
-  const generateContentWithRetry = async (params: any, clientProvidedKeys?: string[]): Promise<any> => {
-    const response = await fetch('/api/gemini/generate', {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...params, clientProvidedKeys })
-    });
-    if (!response.ok) {
-      const err = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
-      throw new Error(err.error || err.message || "Failed to generate content");
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+const generateContentWithRetry = async (params: any, clientProvidedKeys?: string[]): Promise<any> => {
+  let keys = clientProvidedKeys || [];
+  if (!keys || keys.length === 0) {
+    if (typeof window !== 'undefined') {
+      const stored = localStorage.getItem('GEMINI_API_KEYS');
+      if (stored) {
+        try {
+          if (stored.startsWith('[')) {
+            keys = JSON.parse(stored);
+          } else {
+            keys = stored.split(/[,\s\n]+/).map(k => k.trim()).filter(Boolean);
+          }
+        } catch(e) {
+          keys = stored.split(/[,\s\n]+/).map(k => k.trim()).filter(Boolean);
+        }
+      }
     }
-    return response.json();
-  };
+  }
+
+  if (!keys || keys.length === 0) {
+    throw new Error("No Gemini API keys found. Please configure them in Settings.");
+  }
+
+  let lastError: any = null;
+  let attempts = 0;
+  while (attempts < keys.length) {
+    if (currentApiIndex >= keys.length) {
+      currentApiIndex = 0;
+    }
+      
+    const client = new GoogleGenAI({ apiKey: keys[currentApiIndex] });
+    const currentAttemptIndex = currentApiIndex;
+    currentApiIndex = (currentApiIndex + 1) % keys.length;
+    attempts++;
+      
+    try {
+      const res = await client.models.generateContent(params);
+      return res;
+    } catch (err: any) {
+      lastError = err;
+      const msg = (typeof err === 'string' ? err : (err.message || JSON.stringify(err) || "")).toLowerCase();
+        
+      if (msg.includes('quota') || msg.includes('429') || msg.includes('limit') || msg.includes('exhausted')) {
+         console.warn(`Key ${currentAttemptIndex} exhausted, rotating...`);
+         if (attempts < keys.length) await sleep(2000);
+         continue; 
+      }
+      console.warn(`Key failed (attempt ${attempts}), rotating... Error:`, err);
+      if (attempts < keys.length) await sleep(1000);
+    }
+  }
+    
+  const errorString = typeof lastError === 'string' ? lastError : (lastError.message || JSON.stringify(lastError));
+  throw new Error(`Exhausted all ${keys.length} provided Gemini API keys. Final error: ${errorString}`);
+};
 
 
 interface Scene {
@@ -853,17 +898,100 @@ jobs:
   };
 
   const generateImageFromProviders = async (prompt: string): Promise<Blob> => {
-    const response = await fetch('/api/flux/generate', {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt, clientProvidedUrls: imageUrls }),
-      signal: AbortSignal.timeout(60000)
-    });
-    if (!response.ok) {
-      const err = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
-      throw new Error(err.error || err.message || "Failed to generate image");
+    let workerUrls = imageUrls;
+    const storedUrls = typeof window !== 'undefined' ? localStorage.getItem('IMAGE_WORKER_URLS') : null;
+    
+    if (storedUrls) {
+      try {
+        if (storedUrls.startsWith('[')) {
+          workerUrls = JSON.parse(storedUrls);
+        } else {
+          workerUrls = storedUrls.split(/[,\s\n]+/).map(u => u.trim()).filter(Boolean);
+        }
+      } catch (e) {
+        workerUrls = storedUrls.split(/[,\s\n]+/).map(u => u.trim()).filter(Boolean);
+      }
     }
-    return response.blob();
+
+    if (!workerUrls || workerUrls.length === 0) {
+      workerUrls = [
+        "https://flux1.shreevathsa2k27.workers.dev/",
+        "https://flux.shreevathsa2k21-4fa.workers.dev/",
+        "https://flux.vaishakhaphotos2.workers.dev/",
+        "https://flux.vmajibail.workers.dev/"
+      ];
+    }
+
+    const shuffledUrls = [...workerUrls].sort(() => Math.random() - 0.5);
+
+    let lastError = null;
+
+    for (const workerUrl of shuffledUrls) {
+      try {
+        console.log(`[Flux Proxy Frontend] Trying URL: ${workerUrl}`);
+        const response = await fetch(workerUrl.trim(), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ prompt }),
+          signal: AbortSignal.timeout(15000)
+        });
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          console.error(`[Flux Frontend Error] ${workerUrl}:`, response.status, errorText);
+          
+          if (response.status === 429 || response.status >= 500) {
+            lastError = { status: response.status, text: errorText };
+            continue;
+          }
+          throw new Error(errorText || `HTTP ${response.status}`);
+        }
+
+        const arrayBuffer = await response.arrayBuffer();
+        let uintArray = new Uint8Array(arrayBuffer);
+
+        if (uintArray[0] === 123) {
+          const textData = new TextDecoder("utf-8").decode(uintArray);
+          try {
+            const json = JSON.parse(textData);
+            const b64 = json.image || json.result?.image || json.img;
+            if (b64) {
+              const base64Data = b64.replace(/^data:image\/\w+;base64,/, "");
+              const binStr = atob(base64Data);
+              const binArr = new Uint8Array(binStr.length);
+              for (let i = 0; i < binStr.length; i++) {
+                binArr[i] = binStr.charCodeAt(i);
+              }
+              return new Blob([binArr], { type: "image/jpeg" });
+            }
+          } catch (e) {
+            console.error("JSON parse failed", e);
+          }
+        }
+        
+        return new Blob([arrayBuffer], { type: "image/jpeg" });
+
+      } catch (error: any) {
+        console.error(`[Flux Proxy Exception] ${workerUrl}:`, error.message);
+        lastError = { status: 500, text: error.message };
+        continue;
+      }
+    }
+
+    try {
+      console.log(`[Flux Frontend] Using Pollinations fallback`);
+      const response = await fetch(`https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=720&height=1280&nologo=true`, {
+        signal: AbortSignal.timeout(15000)
+      });
+      if (response.ok) {
+        const arrayBuffer = await response.arrayBuffer();
+        return new Blob([arrayBuffer], { type: "image/jpeg" });
+      }
+    } catch (e) {
+      console.error("[Flux Proxy] Pollinations fallback failed:", e);
+    }
+
+    throw new Error(lastError?.text || "All workers failed");
   };
 
   const regenerateImage = async (index: number) => {
